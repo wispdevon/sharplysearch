@@ -316,6 +316,21 @@ if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
   fi
 fi
 
+if [[ -z ${SHARPLY_WAIT_FOR_IMAGE:-} && -r $config_file ]]; then
+  SHARPLY_WAIT_FOR_IMAGE=$(sed -n \
+    's/^[[:space:]]*SHARPLY_WAIT_FOR_IMAGE[[:space:]]*=[[:space:]]*//p' \
+    "$config_file" | tail -n 1)
+  SHARPLY_WAIT_FOR_IMAGE=${SHARPLY_WAIT_FOR_IMAGE%$'\r'}
+  if [[ $SHARPLY_WAIT_FOR_IMAGE == \"*\" || $SHARPLY_WAIT_FOR_IMAGE == \'*\' ]]; then
+    SHARPLY_WAIT_FOR_IMAGE=${SHARPLY_WAIT_FOR_IMAGE:1:${#SHARPLY_WAIT_FOR_IMAGE}-2}
+  fi
+fi
+SHARPLY_WAIT_FOR_IMAGE=${SHARPLY_WAIT_FOR_IMAGE:-false}
+case ${SHARPLY_WAIT_FOR_IMAGE,,} in
+  1|true|yes|on) wait_for_image=true ;;
+  *) wait_for_image=false ;;
+esac
+
 if [[ -z ${SHARPLY_API_KEY:-} ]]; then
   show_message "Add SHARPLY_API_KEY to $config_file"
   exit 1
@@ -544,23 +559,15 @@ if ((${#detail_lines[@]} == 0)); then
   exit 0
 fi
 
-# Give an in-flight thumbnail no more than 150 ms immediately before rendering.
-# A slower successful download remains in the cache for the next invocation.
-grace_started=${EPOCHREALTIME/./}
-if [[ -n $image_pid ]]; then
-  grace_deadline=$((10#$grace_started + 150000))
-  while kill -0 "$image_pid" 2>/dev/null && \
-    ((10#${EPOCHREALTIME/./} < grace_deadline)); do
-    sleep 0.001
-  done
-  if ! kill -0 "$image_pid" 2>/dev/null; then
-    wait "$image_pid" 2>/dev/null || true
-    image_pid=''
-    search_pid=''
-  fi
+# Waiting is opt-in. Otherwise an uncached image never delays the detail window
+# and remains available from the cache on the next invocation.
+if [[ $wait_for_image == true && -n $image_pid ]]; then
+  log_timing 'waiting for thumbnail worker'
+  wait "$image_pid" 2>/dev/null || true
+  image_pid=''
+  search_pid=''
+  log_timing 'thumbnail worker wait completed'
 fi
-grace_finished=${EPOCHREALTIME/./}
-log_timing "image grace period completed ($(((10#$grace_finished - 10#$grace_started) / 1000)) ms)"
 
 if [[ -n ${image_file:-} && -s ${image_file:-} && -r ${image_url_file:-} ]]; then
   cached_image_url=''
@@ -580,7 +587,7 @@ if [[ -n $gear_image ]]; then
   while IFS= read -r css_line || [[ -n $css_line ]]; do
     printf '%s\n' "$css_line"
   done <"$detail_style" >"$runtime_detail_style"
-  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: top center;\n  background-size: auto 210px;\n}\n\n#outer-box {\n  padding-top: 228px;\n}\n' \
+  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: center 16px;\n  background-size: auto 210px;\n}\n\n#outer-box {\n  padding-top: 250px;\n}\n' \
     "$css_image" >>"$runtime_detail_style"
   active_detail_style=$runtime_detail_style
 fi

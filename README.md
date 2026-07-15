@@ -164,9 +164,8 @@ sharply-search --rebuild-cache
 Generated index files live under `$XDG_CACHE_HOME/sharply-search/`, or
 `~/.cache/sharply-search/` when `XDG_CACHE_HOME` is unset, and can be safely deleted.
 The specification-label registry and gear thumbnails are cached there as well.
-Uncached thumbnails download alongside specification data. The detail window
-waits no more than 150 ms for a nearly-ready image, then opens without it while
-the completed download remains cached for the next view.
+Uncached thumbnails download alongside specification data without delaying the
+detail window. The completed download remains cached for the next view.
 
 Because the export does not contain canonical slugs, the launcher first probes a
 normalized best-guess slug such as `Nikon Z6III` → `nikon-z6iii`. A successful
@@ -189,6 +188,15 @@ The installer creates that file with mode `600`. The key is sent only as a Beare
 credential to `https://www.sharplyphoto.com/api/v1/*`; it is not embedded in the
 launcher, browser UI, or command-line arguments. Sharply currently limits each key
 to 60 requests per fixed UTC minute.
+
+To always wait for an uncached thumbnail before opening the detail window, add:
+
+```dotenv
+SHARPLY_WAIT_FOR_IMAGE=true
+```
+
+Leave it unset or set it to `false` to open immediately and use the cached image
+on the next view.
 
 ### Hyprland
 
