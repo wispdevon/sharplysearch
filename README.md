@@ -42,6 +42,11 @@ labels, prices, and technical data stay aligned with Sharply's live catalog.
 This is an independent community launcher. It is not an official Sharply Photo
 application and is not affiliated with Sharply Photo.
 
+<p align="center">
+  <img src="docs/images/sharply-search-results.png" width="49%" alt="Sharply Search gear results in Wofi">
+  <img src="docs/images/sharply-search-details.png" width="49%" alt="Nikon Z6III specifications and cached hero image in Wofi">
+</p>
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Features
@@ -49,6 +54,7 @@ application and is not affiliated with Sharply Photo.
 - Instant fuzzy search over the bundled 1,600+ item Sharply `export.json` catalog.
 - Prebuilt colored search index for near-instant Wofi startup.
 - Real specification values from `/api/v1/gear/{slug}/specs`.
+- Cached Sharply thumbnails in the gear-detail view when available.
 - Authoritative labels from Sharply's live `/api/v1/specs` registry.
 - Aligned `Label │ Value` columns in a dedicated monospace detail view.
 - Case-insensitive fuzzy matching for gear and individual specifications.
@@ -157,9 +163,15 @@ sharply-search --rebuild-cache
 
 Generated index files live under `$XDG_CACHE_HOME/sharply-search/`, or
 `~/.cache/sharply-search/` when `XDG_CACHE_HOME` is unset, and can be safely deleted.
+The specification-label registry and gear thumbnails are cached there as well.
+Uncached thumbnails download alongside specification data. The detail window
+waits no more than 150 ms for a nearly-ready image, then opens without it while
+the completed download remains cached for the next view.
 
-Because the export does not contain canonical slugs or gear types, selecting an
-item makes one authenticated exact-name search request before loading its specs.
+Because the export does not contain canonical slugs, the launcher first probes a
+normalized best-guess slug such as `Nikon Z6III` → `nikon-z6iii`. A successful
+probe loads specifications directly; otherwise an exact-name search resolves the
+canonical slug. Search may also run in the background to populate a missing image.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
