@@ -1,0 +1,10 @@
+* { font-family: "DM Mono", monospace; font-size: 13px; }
+window { background-color: #090c0f; border: 1px solid #3d493e; border-radius: 8px; }
+#outer-box { padding: 14px; }
+#input { margin: 0 0 12px; padding: 13px 15px; color: #edf0ec; background: #141a16; border: 0; border-bottom: 2px solid #d8ff4e; border-radius: 3px; }
+#input:focus { box-shadow: none; }
+#scroll { margin: 0; }
+#entry { padding: 9px 13px; border-radius: 3px; }
+#entry:selected { background: #d8ff4e; color: #101510; }
+#text { color: #d9ded9; }
+#entry:selected #text { color: #101510; font-weight: 700; }

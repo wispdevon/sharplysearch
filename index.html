@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090c0f" />
+    <title>Sharply Search</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <a class="wordmark" href="https://www.sharplyphoto.com" target="_blank" rel="noreferrer">sharply<span>.</span></a>
+        <p>GEAR FINDER <span>⌘ K</span></p>
+      </header>
+
+      <section class="finder" aria-label="Sharply gear finder">
+        <div class="search-row">
+          <span class="magnifier" aria-hidden="true"></span>
+          <input id="search" type="search" autocomplete="off" placeholder="Search cameras & lenses…" aria-label="Search cameras and lenses" autofocus />
+          <kbd>ESC</kbd>
+        </div>
+        <div class="filters" role="group" aria-label="Gear type">
+          <button class="filter active" data-type="all">All gear <span id="all-count"></span></button>
+          <button class="filter" data-type="camera">Cameras <span id="camera-count"></span></button>
+          <button class="filter" data-type="lens">Lenses <span id="lens-count"></span></button>
+        </div>
+        <div class="result-head">
+          <span id="result-status">Popular on Sharply</span>
+          <span class="keys"><kbd>↑</kbd><kbd>↓</kbd> TO NAVIGATE <kbd>↵</kbd> TO OPEN</span>
+        </div>
+        <ul id="results" class="results" aria-live="polite"></ul>
+        <p id="empty" class="empty" hidden>No matching gear in the quick list.</p>
+        <button id="site-search" class="site-search" hidden>Search all of Sharply <span>↗</span></button>
+      </section>
+
+      <footer>
+        <span>QUICK LINKS</span>
+        <a href="https://www.sharplyphoto.com/browse" target="_blank" rel="noreferrer">Browse all gear ↗</a>
+        <a href="https://www.sharplyphoto.com/lists/under-construction" target="_blank" rel="noreferrer">Community database ↗</a>
+      </footer>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

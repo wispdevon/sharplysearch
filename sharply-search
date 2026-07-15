@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Search live cameras and lenses through Sharply's supported developer API.
+set -euo pipefail
+
+readonly script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly root="$(cd -- "$(dirname -- "$script_path")" && pwd)"
+readonly style="$root/wofi-style.css"
+readonly detail_style="$root/wofi-details.css"
+readonly site='https://www.sharplyphoto.com'
+readonly api="$site/api/v1"
+readonly config_file="${XDG_CONFIG_HOME:-$HOME/.config}/sharply-search/.env"
+readonly spec_fields='gear.basics,camera.sensor,camera.shutter,camera.fixed-lens,camera.build,camera.focus,camera.power,camera.video,camera.features,lens.optics,lens.aperture,lens.focus,lens.stabilization,lens.build,lens.filters,lens.accessories,lens.tiltShift,analog.camera'
+
+for dependency in wofi curl jq xdg-open wl-copy; do
+  command -v "$dependency" >/dev/null || {
+    printf 'sharply-search: %s is not installed\n' "$dependency" >&2
+    exit 1
+  }
+done
+
+show_message() {
+  printf '%s\n' "$1" | wofi --dmenu --prompt 'Sharply gear' --style "$style" \
+    --width 680 --lines 1 --no-custom-entry >/dev/null || true
+}
+
+# Read one dotenv assignment without executing the file as shell code.
+if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
+  SHARPLY_API_KEY=$(sed -n \
+    's/^[[:space:]]*SHARPLY_API_KEY[[:space:]]*=[[:space:]]*//p' \
+    "$config_file" | tail -n 1)
+  SHARPLY_API_KEY=${SHARPLY_API_KEY%$'\r'}
+  if [[ $SHARPLY_API_KEY == \"*\" || $SHARPLY_API_KEY == \'*\' ]]; then
+    SHARPLY_API_KEY=${SHARPLY_API_KEY:1:${#SHARPLY_API_KEY}-2}
+  fi
+fi
+
+if [[ -z ${SHARPLY_API_KEY:-} ]]; then
+  show_message "Add SHARPLY_API_KEY to $config_file"
+  exit 1
+fi
+if [[ $SHARPLY_API_KEY != sharply_live_* ]]; then
+  show_message 'The configured Sharply API key has an invalid prefix.'
+  exit 1
+fi
+search_response=$(mktemp)
+detail_response=$(mktemp)
+catalog_response=$(mktemp)
+trap 'rm -f "$search_response" "$detail_response" "$catalog_response"' EXIT
+
+api_get() {
+  local output=$1 endpoint=$2 status message
+  shift 2
+
+  # Feed sensitive headers through curl's stdin config so the key is not visible
+  # in the process command line.
+  if ! status=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\n' \
+    "$SHARPLY_API_KEY" | curl --config - --silent --show-error --max-time 20 \
+    --output "$output" --write-out '%{http_code}' "$@" "$api/$endpoint"); then
+    show_message 'Could not connect to the Sharply API.'
+    return 1
+  fi
+
+  if [[ $status != 2* ]]; then
+    message=$(jq -r '.error.message // empty' "$output" 2>/dev/null || true)
+    [[ -n $message ]] || message="Sharply API request failed (HTTP $status)."
+    show_message "$message"
+    return 1
+  fi
+
+  if ! jq -e . "$output" >/dev/null 2>&1; then
+    show_message 'Sharply returned an invalid API response.'
+    return 1
+  fi
+}
+
+# --exec-search returns exactly what the user typed.
+query=$(printf '\n' | wofi --dmenu --exec-search --prompt 'Search Sharply gear' \
+  --style "$style" --width 680 --lines 1) || exit 0
+query=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$query")
+[[ -n $query ]] || exit 0
+
+if ((${#query} < 2 || ${#query} > 200)); then
+  show_message 'Search queries must be between 2 and 200 characters.'
+  exit 0
+fi
+
+api_get "$search_response" search --get \
+  --data-urlencode "q=$query" --data 'page=1' --data 'limit=25' || exit 1
+
+declare -a choices=()
+declare -A slugs=()
+while IFS=$'\t' read -r label slug; do
+  [[ -n $label && -n $slug ]] || continue
+  choices+=("$label")
+  slugs["$label"]="$slug"
+done < <(
+  jq -r '
+    .data[]
+    | select(.gearType | test("CAMERA|LENS"))
+    | ["[" + (.gearType | gsub("_"; " ")) + "]  " + .name, .slug]
+    | @tsv
+  ' "$search_response"
+)
+
+if ((${#choices[@]} == 0)); then
+  show_message 'No camera or lens listings found.'
+  exit 0
+fi
+
+choice=$(printf '%s\n' "${choices[@]}" | wofi --dmenu \
+  --prompt "Sharply: $query" --insensitive --matching fuzzy \
+  --style "$style" --width 680 --lines 12 --no-custom-entry) || exit 0
+
+slug=${slugs[$choice]:-}
+[[ -n $slug ]] || exit 0
+
+api_get "$catalog_response" specs || exit 1
+api_get "$detail_response" "gear/$slug/specs" --get \
+  --data-urlencode "fields=$spec_fields" || exit 1
+
+mapfile -t detail_lines < <(
+  jq -r --slurp '
+    def pad($width):
+      . as $text
+      | $text + (" " * ([($width - ($text | length)), 0] | max));
+    (.[0].data.categories
+      | map(.fields[])
+      | map({ key: .id, value: .label })
+      | from_entries) as $labels
+    | .[1].data[]
+    | (($labels[.id] // .id) | pad(38)) + " │ " + .display
+  ' "$catalog_response" "$detail_response"
+)
+if ((${#detail_lines[@]} == 0)); then
+  show_message 'Sharply has no published specifications for this item.'
+  exit 0
+fi
+
+detail_lines+=("↗  Open full Sharply page")
+detail_choice=$(printf '%s\n' "${detail_lines[@]}" | wofi --dmenu \
+  --prompt "Filter specs: ${choice#*]  }" --style "$detail_style" \
+  --width 940 --lines 18 --insensitive --matching fuzzy \
+  --no-custom-entry) || exit 0
+
+if [[ $detail_choice == '↗  Open full Sharply page' ]]; then
+  xdg-open "$site/gear/$slug" >/dev/null 2>&1 &
+elif [[ $detail_choice == *' │ '* ]]; then
+  label=${detail_choice%%' │ '*}
+  label=$(sed 's/[[:space:]]*$//' <<<"$label")
+  value=${detail_choice#*' │ '}
+  printf '%s: %s' "$label" "$value" | wl-copy
+  if command -v notify-send >/dev/null; then
+    notify-send --app-name='Sharply Search' 'Spec copied' "$label: $value"
+  fi
+fi
