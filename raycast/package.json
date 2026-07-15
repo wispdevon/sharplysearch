@@ -1,0 +1,50 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "sharply-search",
+  "title": "Sharply Search",
+  "description": "Search photography gear and inspect live Sharply specifications.",
+  "icon": "icon.png",
+  "author": "wisp",
+  "platforms": ["macOS"],
+  "categories": ["Productivity"],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "search-gear",
+      "title": "Search Sharply Gear",
+      "description": "Find cameras and lenses and inspect their specifications",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "apiKey",
+      "title": "Sharply API Key",
+      "description": "A read-only developer API key from sharplyphoto.com.",
+      "type": "password",
+      "required": true,
+      "placeholder": "sharply_live_…"
+    }
+  ],
+  "scripts": {
+    "sync-catalog": "cp ../export.json assets/catalog.json",
+    "prebuild": "npm run sync-catalog",
+    "build": "ray build -e dist -o dist",
+    "predev": "npm run sync-catalog",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "fix-lint": "ray lint --fix"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.104.23",
+    "@raycast/utils": "^2.2.7"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.0.4",
+    "@types/node": "22.15.29",
+    "@types/react": "19.1.8",
+    "eslint": "^9.28.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -6,12 +6,13 @@
 
 ### Photography gear, one shortcut away.
 
-A native Wayland launcher for finding real cameras and lenses on
+A native Wayland and macOS launcher for finding real cameras and lenses on
 [Sharply Photo](https://www.sharplyphoto.com/), inspecting their live specifications,
 and copying the details you need without leaving the keyboard.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-d8ff4e.svg?style=for-the-badge&labelColor=111510)](LICENSE)
 [![Platform: Wayland](https://img.shields.io/badge/Platform-Wayland-d8ff4e?style=for-the-badge&labelColor=111510)](https://wayland.freedesktop.org/)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-d8ff4e?style=for-the-badge&labelColor=111510)](raycast/)
 [![Launcher: Wofi](https://img.shields.io/badge/Launcher-Wofi-d8ff4e?style=for-the-badge&labelColor=111510)](https://hg.sr.ht/~scoopta/wofi)
 [![Data: Sharply API](https://img.shields.io/badge/Data-Sharply_API-d8ff4e?style=for-the-badge&labelColor=111510)](https://www.sharplyphoto.com/developer/docs)
 
@@ -34,10 +35,10 @@ and copying the details you need without leaving the keyboard.
 
 ## About
 
-Sharply Search turns `Super+G` into a fast photography-gear reference. It talks
-directly to Sharply's supported, read-only developer API and presents the results
-in Wofi. Search results and specifications are never maintained locally, so names,
-labels, prices, and technical data stay aligned with Sharply's live catalog.
+Sharply Search turns a global launcher shortcut into a fast photography-gear
+reference. It talks directly to Sharply's supported, read-only developer API and
+presents the results in Wofi on Wayland or Raycast on macOS. Gear specifications
+are fetched live so prices and technical data stay aligned with Sharply's catalog.
 
 This is an independent community launcher. It is not an official Sharply Photo
 application and is not affiliated with Sharply Photo.
@@ -72,6 +73,7 @@ application and is not affiliated with Sharply Photo.
 | Requirement | Purpose |
 |---|---|
 | Linux with a Wayland session | Runtime platform |
+| macOS with [Raycast](https://www.raycast.com/) | Native macOS launcher |
 | [Wofi](https://hg.sr.ht/~scoopta/wofi) | Search and detail interface |
 | Bash 5+ | Launcher runtime and startup timing |
 | `curl` | Authenticated slug-resolution and specification requests |
@@ -82,6 +84,7 @@ application and is not affiliated with Sharply Photo.
 | Hyprland *(optional)* | Automatic `Super+G` binding |
 | Sharply developer API key | Access to the read-only `/api/v1` endpoints |
 | Fontconfig (`fc-cache`) | Registering the bundled Space Grotesk font |
+| Node.js 22+ *(macOS port only)* | Raycast extension development runtime |
 
 Example package installation on Arch Linux:
 
@@ -92,6 +95,8 @@ sudo pacman -S wofi curl jq wl-clipboard xdg-utils libnotify
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Installation
+
+### Linux and Wayland
 
 1. Open a terminal in your checkout:
 
@@ -136,7 +141,30 @@ The installer creates these links and files:
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+### macOS and Raycast
+
+1. Install [Raycast](https://www.raycast.com/) and Node.js 22 or newer.
+2. Open a terminal in the `raycast` directory.
+3. Install and start the development extension:
+
+   ```bash
+   npm install
+   npm run dev
+   ```
+
+4. Enter your `sharply_live_…` key in the secure **Sharply API Key** preference.
+5. Run **Search Sharply Gear** in Raycast. Use Raycast Preferences to assign a
+   global keyboard shortcut if desired.
+
+Raycast keeps the command installed after the development process stops. Run
+`npm run dev` again when updating the extension. See the [Raycast-specific
+documentation](raycast/README.md) for implementation details.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 ## Usage
+
+### Linux and Wayland
 
 1. Press `Super+G`.
 2. Type at least two characters, such as `Nikon Z6` or `Sony 24-70`.
@@ -150,6 +178,15 @@ The installer creates these links and files:
    ```
 
 Select **Open full Sharply page** to open the complete listing in your default browser.
+
+### macOS and Raycast
+
+1. Open Raycast and run **Search Sharply Gear**.
+2. Fuzzy-search by model, brand, or mount.
+3. Press `Enter` to open the live specification view.
+4. Filter by specification label or value.
+5. Press `Enter` to copy the selected `Label: Value`; use `⌘K` for reload and
+   browser actions.
 
 Gear names, brands, and mounts are read directly from `export.json` beside the
 launcher, so typing does not make network requests. To update the catalog, replace
