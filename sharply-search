@@ -9,43 +9,34 @@ readonly detail_style="$root/wofi-details.css"
 readonly site='https://www.sharplyphoto.com'
 readonly api="$site/api/v1"
 readonly config_file="${XDG_CONFIG_HOME:-$HOME/.config}/sharply-search/.env"
+readonly gear_database="$root/export.json"
+readonly cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sharply-search"
+readonly catalog_rows="$cache_dir/catalog.rows"
+readonly catalog_lookup="$cache_dir/catalog.lookup.tsv"
+readonly catalog_manifest="$cache_dir/catalog.manifest"
+readonly cache_format_version=1
 readonly spec_fields='gear.basics,camera.sensor,camera.shutter,camera.fixed-lens,camera.build,camera.focus,camera.power,camera.video,camera.features,lens.optics,lens.aperture,lens.focus,lens.stabilization,lens.build,lens.filters,lens.accessories,lens.tiltShift,analog.camera'
+readonly timing_log="${SHARPLY_SEARCH_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/sharply-search/timing.log}"
+timing_started=${EPOCHREALTIME/./}
+timing_previous=$timing_started
 
-for dependency in wofi curl jq xdg-open wl-copy; do
-  command -v "$dependency" >/dev/null || {
-    printf 'sharply-search: %s is not installed\n' "$dependency" >&2
-    exit 1
-  }
-done
+log_timing() {
+  local event=$1 now elapsed delta
+  now=${EPOCHREALTIME/./}
+  elapsed=$(((10#$now - 10#$timing_started) / 1000))
+  delta=$(((10#$now - 10#$timing_previous) / 1000))
+  printf '%(%Y-%m-%dT%H:%M:%S%z)T  +%6d ms  total=%6d ms  %s\n' \
+    -1 "$delta" "$elapsed" "$event" >>"$timing_log" 2>/dev/null || true
+  timing_previous=$now
+}
+
+mkdir -p -- "${timing_log%/*}" 2>/dev/null || true
+log_timing 'launcher started'
 
 show_message() {
   printf '%s\n' "$1" | wofi --dmenu --prompt 'Sharply gear' --style "$style" \
-    --width 680 --lines 1 --no-custom-entry >/dev/null || true
+    --width 900 --lines 1 --no-custom-entry >/dev/null || true
 }
-
-# Read one dotenv assignment without executing the file as shell code.
-if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
-  SHARPLY_API_KEY=$(sed -n \
-    's/^[[:space:]]*SHARPLY_API_KEY[[:space:]]*=[[:space:]]*//p' \
-    "$config_file" | tail -n 1)
-  SHARPLY_API_KEY=${SHARPLY_API_KEY%$'\r'}
-  if [[ $SHARPLY_API_KEY == \"*\" || $SHARPLY_API_KEY == \'*\' ]]; then
-    SHARPLY_API_KEY=${SHARPLY_API_KEY:1:${#SHARPLY_API_KEY}-2}
-  fi
-fi
-
-if [[ -z ${SHARPLY_API_KEY:-} ]]; then
-  show_message "Add SHARPLY_API_KEY to $config_file"
-  exit 1
-fi
-if [[ $SHARPLY_API_KEY != sharply_live_* ]]; then
-  show_message 'The configured Sharply API key has an invalid prefix.'
-  exit 1
-fi
-search_response=$(mktemp)
-detail_response=$(mktemp)
-catalog_response=$(mktemp)
-trap 'rm -f "$search_response" "$detail_response" "$catalog_response"' EXIT
 
 api_get() {
   local output=$1 endpoint=$2 status message
@@ -73,62 +64,254 @@ api_get() {
   fi
 }
 
-# --exec-search returns exactly what the user typed.
-query=$(printf '\n' | wofi --dmenu --exec-search --prompt 'Search Sharply gear' \
-  --style "$style" --width 680 --lines 1) || exit 0
-query=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$query")
-[[ -n $query ]] || exit 0
+cache_is_fresh() {
+  local version
+  [[ -r $gear_database ]] || return 1
+  [[ -s $catalog_rows && -s $catalog_lookup && -r $catalog_manifest ]] || return 1
+  [[ $catalog_manifest -nt $gear_database ]] || return 1
+  IFS= read -r version <"$catalog_manifest" || return 1
+  [[ $version == "$cache_format_version" ]]
+}
 
-if ((${#query} < 2 || ${#query} > 200)); then
-  show_message 'Search queries must be between 2 and 200 characters.'
-  exit 0
+build_catalog_cache() {
+  local master_tmp rows_tmp lookup_tmp manifest_tmp choice_markup name brand count=0
+
+  command -v jq >/dev/null || {
+    printf 'sharply-search: jq is required to build the catalog cache\n' >&2
+    return 1
+  }
+  [[ -r $gear_database ]] || {
+    printf 'sharply-search: %s is missing\n' "$gear_database" >&2
+    return 1
+  }
+
+  mkdir -p -- "$cache_dir"
+  master_tmp=$(mktemp "$cache_dir/.catalog-master.XXXXXX")
+  rows_tmp=$(mktemp "$cache_dir/.catalog-rows.XXXXXX")
+  lookup_tmp=$(mktemp "$cache_dir/.catalog-lookup.XXXXXX")
+  manifest_tmp=$(mktemp "$cache_dir/.catalog-manifest.XXXXXX")
+
+  if ! jq -er '
+    if (.items | type) != "array" then error("export.json must contain an items array") else . end
+    |
+    def span($color; $weight; $text; $size):
+      "<span foreground=\"" + $color + "\" weight=\"" + $weight
+      + "\"" + (if $size == "" then "" else " size=\"" + $size + "\"" end)
+      + ">" + ($text | @html) + "</span>";
+    def pad($width):
+      . + (" " * ([($width - length), 0] | max));
+    def brand_markup($brand; $width):
+      ($brand | ascii_downcase) as $key
+      | ($brand | pad($width)) as $padded
+      | if $key == "panasonic" then span("#4f8cff"; "700"; $padded; "smaller")
+        elif $key == "canon" then span("#f04b4b"; "700"; $padded; "smaller")
+        elif $key == "fuji" or $key == "fujifilm" then span("#49a66f"; "700"; $padded; "smaller")
+        elif $key == "nikon" then span("#f4cf42"; "700"; $padded; "smaller")
+        elif $key == "phase one" or $key == "phaseone" or $key == "sirui" then
+          span("#76c7e8"; "700"; $padded; "smaller")
+        elif $key == "astrhori" or $key == "7artisans" then
+          span("#f04b4b"; "750"; $padded[0:1]; "smaller")
+          + span("#f2f0ea"; "700"; $padded[1:]; "smaller")
+        elif $key == "ttartisan" or $key == "ttartisans" then
+          span("#f04b4b"; "750"; $padded[0:2]; "smaller")
+          + span("#f2f0ea"; "700"; $padded[2:]; "smaller")
+        else span("#a6abb0"; "650"; $padded; "smaller")
+        end;
+    def product_name($name; $brand):
+      if (($name | ascii_downcase) | startswith($brand | ascii_downcase))
+         and ($name[($brand | length):($brand | length) + 1] | test("\\s"))
+      then ($name[($brand | length):] | sub("^\\s+"; ""))
+      else $name
+      end;
+
+    ([.items[].brand // "Unknown" | length] | max // 7) as $brand_width
+    | .items[]
+    | .name as $name
+    | (.brand // "Unknown") as $brand
+    | product_name($name; $brand) as $product
+    | (.mounts // [] | join(", ")) as $mounts
+    | (brand_markup($brand; $brand_width)
+       + "  " + span("#f2f0ea"; "650"; $product; "")
+       + (if $mounts == "" then ""
+          else "  " + span("#7e8995"; "500"; "· " + $mounts; "smaller")
+          end)) as $markup
+    | [$markup, $name, $brand]
+    | join("\t")
+  ' "$gear_database" >"$master_tmp"; then
+    rm -f -- "$master_tmp" "$rows_tmp" "$lookup_tmp" "$manifest_tmp"
+    printf 'sharply-search: the bundled export.json is invalid\n' >&2
+    return 1
+  fi
+
+  while IFS=$'\t' read -r choice_markup name brand; do
+    [[ -n $choice_markup && -n $name ]] || continue
+    printf '%s\n' "$choice_markup" >>"$rows_tmp"
+    printf '%s\t%s\t%s\n' "$choice_markup" "$name" "$brand" >>"$lookup_tmp"
+    ((count += 1))
+  done <"$master_tmp"
+  rm -f -- "$master_tmp"
+
+  if ((count == 0)); then
+    rm -f -- "$rows_tmp" "$lookup_tmp" "$manifest_tmp"
+    printf 'sharply-search: the local catalog is empty\n' >&2
+    return 1
+  fi
+
+  printf '%s\n' "$cache_format_version" >"$manifest_tmp"
+  mv -f -- "$rows_tmp" "$catalog_rows"
+  mv -f -- "$lookup_tmp" "$catalog_lookup"
+  mv -f -- "$manifest_tmp" "$catalog_manifest"
+  log_timing "catalog cache rebuilt ($count items)"
+}
+
+case ${1:-} in
+  '')
+    if ! command -v wofi >/dev/null; then
+      printf 'sharply-search: wofi is not installed\n' >&2
+      exit 1
+    fi
+    log_timing 'Wofi dependency checked'
+    ;;
+  --rebuild-cache)
+    (($# == 1)) || {
+      printf 'Usage: sharply-search [--rebuild-cache]\n' >&2
+      exit 2
+    }
+    build_catalog_cache
+    printf 'Rebuilt Sharply catalog cache in %s\n' "$cache_dir"
+    exit 0
+    ;;
+  *)
+    printf 'Usage: sharply-search [--rebuild-cache]\n' >&2
+    exit 2
+    ;;
+esac
+
+if cache_is_fresh; then
+  log_timing 'catalog cache hit'
+else
+  log_timing 'catalog cache stale or missing'
+  if ! build_catalog_cache; then
+    show_message 'Could not build the local Sharply catalog cache.'
+    exit 1
+  fi
 fi
 
-api_get "$search_response" search --get \
-  --data-urlencode "q=$query" --data 'page=1' --data 'limit=25' || exit 1
+log_timing 'opening search window'
+choice=$(wofi --dmenu \
+  --prompt 'Search Sharply gear' --insensitive --matching fuzzy \
+  --style "$style" --width 900 --lines 14 --allow-markup --parse-search \
+  --no-custom-entry <"$catalog_rows") || exit 0
 
-declare -a choices=()
-declare -A slugs=()
-while IFS=$'\t' read -r label slug; do
-  [[ -n $label && -n $slug ]] || continue
-  choices+=("$label")
-  slugs["$label"]="$slug"
-done < <(
-  jq -r '
-    .data[]
+selected_name=''
+selected_brand=''
+while IFS=$'\t' read -r choice_markup name brand; do
+  if [[ $choice_markup == "$choice" ]]; then
+    selected_name=$name
+    selected_brand=$brand
+    break
+  fi
+done <"$catalog_lookup"
+[[ -n $selected_name ]] || exit 0
+
+for dependency in curl jq xdg-open wl-copy; do
+  command -v "$dependency" >/dev/null || {
+    show_message "$dependency is not installed."
+    exit 1
+  }
+done
+log_timing 'post-selection dependencies checked'
+
+# Read one dotenv assignment without executing the file as shell code.
+if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
+  SHARPLY_API_KEY=$(sed -n \
+    's/^[[:space:]]*SHARPLY_API_KEY[[:space:]]*=[[:space:]]*//p' \
+    "$config_file" | tail -n 1)
+  SHARPLY_API_KEY=${SHARPLY_API_KEY%$'\r'}
+  if [[ $SHARPLY_API_KEY == \"*\" || $SHARPLY_API_KEY == \'*\' ]]; then
+    SHARPLY_API_KEY=${SHARPLY_API_KEY:1:${#SHARPLY_API_KEY}-2}
+  fi
+fi
+
+if [[ -z ${SHARPLY_API_KEY:-} ]]; then
+  show_message "Add SHARPLY_API_KEY to $config_file"
+  exit 1
+fi
+if [[ $SHARPLY_API_KEY != sharply_live_* ]]; then
+  show_message 'The configured Sharply API key has an invalid prefix.'
+  exit 1
+fi
+
+search_response=$(mktemp)
+detail_response=$(mktemp)
+catalog_response=$(mktemp)
+trap 'rm -f "$search_response" "$detail_response" "$catalog_response"' EXIT
+log_timing 'API configuration initialized'
+
+# The export intentionally contains names, brands, and mounts but not slugs.
+# Resolve the selected exact name once; typing and fuzzy filtering stay local.
+api_get "$search_response" search --get --data-urlencode "q=$selected_name" \
+  --data 'page=1' --data 'limit=25' || exit 1
+
+slug=$(jq -r --arg name "$selected_name" --arg brand "$selected_brand" '
+  ([.data[]
     | select(.gearType | test("CAMERA|LENS"))
-    | ["[" + (.gearType | gsub("_"; " ")) + "]  " + .name, .slug]
-    | @tsv
-  ' "$search_response"
-)
+    | select(.name == $name and ($brand == "" or .brandName == $brand))][0].slug)
+  // ([.data[]
+    | select(.gearType | test("CAMERA|LENS"))
+    | select(.name == $name)][0].slug)
+  // empty
+' "$search_response")
 
-if ((${#choices[@]} == 0)); then
-  show_message 'No camera or lens listings found.'
-  exit 0
+if [[ -z $slug ]]; then
+  show_message 'Could not resolve this catalog item to a published gear page.'
+  exit 1
 fi
-
-choice=$(printf '%s\n' "${choices[@]}" | wofi --dmenu \
-  --prompt "Sharply: $query" --insensitive --matching fuzzy \
-  --style "$style" --width 680 --lines 12 --no-custom-entry) || exit 0
-
-slug=${slugs[$choice]:-}
-[[ -n $slug ]] || exit 0
 
 api_get "$catalog_response" specs || exit 1
 api_get "$detail_response" "gear/$slug/specs" --get \
   --data-urlencode "fields=$spec_fields" || exit 1
 
-mapfile -t detail_lines < <(
+declare -a detail_lines=()
+declare -A detail_copy=()
+readonly detail_label_width=34
+readonly detail_value_width=68
+
+while IFS=$'\t' read -r label value; do
+  [[ -n $label && -n $value ]] || continue
+
+  # Keep each specification within the viewport: long values become exactly
+  # two visual rows, while the unabridged value remains available for copying.
+  if ((${#label} > detail_label_width)); then
+    label_display="${label:0:detail_label_width-1}…"
+  else
+    printf -v label_display '%-*s' "$detail_label_width" "$label"
+  fi
+
+  first_value=${value:0:detail_value_width}
+  display_line="$label_display │ $first_value"
+  if ((${#value} > detail_value_width)); then
+    second_value=${value:detail_value_width:detail_value_width}
+    if ((${#value} > detail_value_width * 2)); then
+      second_value="${second_value:0:detail_value_width-1}…"
+    fi
+    printf -v continuation '%*s │ %s' "$detail_label_width" '' "$second_value"
+    display_line="$(jq -Rr @html <<<"$display_line")&#10;$(jq -Rr @html <<<"$continuation")"
+  else
+    display_line=$(jq -Rr @html <<<"$display_line")
+  fi
+
+  detail_lines+=("$display_line")
+  detail_copy["$display_line"]="$label: $value"
+done < <(
   jq -r --slurp '
-    def pad($width):
-      . as $text
-      | $text + (" " * ([($width - ($text | length)), 0] | max));
     (.[0].data.categories
       | map(.fields[])
       | map({ key: .id, value: .label })
       | from_entries) as $labels
     | .[1].data[]
-    | (($labels[.id] // .id) | pad(38)) + " │ " + .display
+    | [($labels[.id] // .id), .display]
+    | @tsv
   ' "$catalog_response" "$detail_response"
 )
 if ((${#detail_lines[@]} == 0)); then
@@ -138,18 +321,16 @@ fi
 
 detail_lines+=("↗  Open full Sharply page")
 detail_choice=$(printf '%s\n' "${detail_lines[@]}" | wofi --dmenu \
-  --prompt "Filter specs: ${choice#*]  }" --style "$detail_style" \
-  --width 940 --lines 18 --insensitive --matching fuzzy \
-  --no-custom-entry) || exit 0
+  --prompt "Filter specs: $selected_name" --style "$detail_style" \
+  --width '92%' --height '88%' --insensitive --matching fuzzy \
+  --allow-markup --parse-search --no-custom-entry) || exit 0
 
 if [[ $detail_choice == '↗  Open full Sharply page' ]]; then
   xdg-open "$site/gear/$slug" >/dev/null 2>&1 &
-elif [[ $detail_choice == *' │ '* ]]; then
-  label=${detail_choice%%' │ '*}
-  label=$(sed 's/[[:space:]]*$//' <<<"$label")
-  value=${detail_choice#*' │ '}
-  printf '%s: %s' "$label" "$value" | wl-copy
+elif [[ -n ${detail_copy[$detail_choice]:-} ]]; then
+  copied_spec=${detail_copy[$detail_choice]}
+  printf '%s' "$copied_spec" | wl-copy
   if command -v notify-send >/dev/null; then
-    notify-send --app-name='Sharply Search' 'Spec copied' "$label: $value"
+    notify-send --app-name='Sharply Search' 'Spec copied' "$copied_spec"
   fi
 fi

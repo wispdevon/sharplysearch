@@ -46,7 +46,8 @@ application and is not affiliated with Sharply Photo.
 
 ## Features
 
-- Live camera, analog-camera, and lens search through `/api/v1/search`.
+- Instant fuzzy search over the bundled 1,600+ item Sharply `export.json` catalog.
+- Prebuilt colored search index for near-instant Wofi startup.
 - Real specification values from `/api/v1/gear/{slug}/specs`.
 - Authoritative labels from Sharply's live `/api/v1/specs` registry.
 - Aligned `Label │ Value` columns in a dedicated monospace detail view.
@@ -66,14 +67,15 @@ application and is not affiliated with Sharply Photo.
 |---|---|
 | Linux with a Wayland session | Runtime platform |
 | [Wofi](https://hg.sr.ht/~scoopta/wofi) | Search and detail interface |
-| Bash 4+ | Launcher runtime |
-| `curl` | Authenticated Sharply API requests |
+| Bash 5+ | Launcher runtime and startup timing |
+| `curl` | Authenticated slug-resolution and specification requests |
 | `jq` | JSON processing and live label mapping |
 | `wl-copy` from `wl-clipboard` | Copying selected specifications |
 | `xdg-open` | Opening full gear pages |
 | `notify-send` *(optional)* | Copy confirmation notifications |
 | Hyprland *(optional)* | Automatic `Super+G` binding |
 | Sharply developer API key | Access to the read-only `/api/v1` endpoints |
+| Fontconfig (`fc-cache`) | Registering the bundled Space Grotesk font |
 
 Example package installation on Arch Linux:
 
@@ -143,6 +145,22 @@ The installer creates these links and files:
 
 Select **Open full Sharply page** to open the complete listing in your default browser.
 
+Gear names, brands, and mounts are read directly from `export.json` beside the
+launcher, so typing does not make network requests. To update the catalog, replace
+that file with a newer Sharply JSON export using the same `{ "items": [...] }` shape.
+The launcher automatically rebuilds its colored index when the export changes.
+To rebuild it manually, run:
+
+```bash
+sharply-search --rebuild-cache
+```
+
+Generated index files live under `$XDG_CACHE_HOME/sharply-search/`, or
+`~/.cache/sharply-search/` when `XDG_CACHE_HOME` is unset, and can be safely deleted.
+
+Because the export does not contain canonical slugs or gear types, selecting an
+item makes one authenticated exact-name search request before loading its specs.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Configuration
@@ -195,6 +213,7 @@ bindsym $mod+g exec sharply-search
 | `wl-copy` missing | Install the `wl-clipboard` package. |
 | `Super+G` does nothing | Run `./install.sh`, then `hyprctl reload`. |
 | Styles are missing | Keep the CSS files beside the launcher or rerun the installer. |
+| Search index is stale | Run `sharply-search --rebuild-cache`. |
 
 API errors returned by Sharply are displayed directly in Wofi.
 
@@ -215,5 +234,7 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for details.
   [othneildrew/Best-README-Template](https://github.com/othneildrew/Best-README-Template).
 - Built around [Wofi](https://hg.sr.ht/~scoopta/wofi), Wayland, and the small Unix
   tools that make desktop automation delightful.
+- Space Grotesk is bundled under the SIL Open Font License 1.1; see
+  [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
