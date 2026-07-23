@@ -51,7 +51,7 @@ application and is not affiliated with Sharply Photo.
 
 ## Features
 
-- Instant fuzzy search over the bundled 1,600+ item Sharply `export.json` catalog.
+- Instant fuzzy search over Sharply's cached 1,600+ item API catalog.
 - Prebuilt colored search index for near-instant Wofi startup.
 - Real specification values from `/api/v1/gear/{slug}/specs`.
 - Cached Sharply thumbnails in the gear-detail view when available.
@@ -74,7 +74,7 @@ application and is not affiliated with Sharply Photo.
 | Linux with a Wayland session | Runtime platform |
 | [Wofi](https://hg.sr.ht/~scoopta/wofi) | Search and detail interface |
 | Bash 5+ | Launcher runtime and startup timing |
-| `curl` | Authenticated slug-resolution and specification requests |
+| `curl` | Authenticated catalog and specification requests |
 | `jq` | JSON processing and live label mapping |
 | `wl-copy` from `wl-clipboard` | Copying selected specifications |
 | `xdg-open` | Opening full gear pages |
@@ -151,11 +151,12 @@ The installer creates these links and files:
 
 Select **Open full Sharply page** to open the complete listing in your default browser.
 
-Gear names, brands, and mounts are read directly from `export.json` beside the
-launcher, so typing does not make network requests. To update the catalog, replace
-that file with a newer Sharply JSON export using the same `{ "items": [...] }` shape.
-The launcher automatically rebuilds its colored index when the export changes.
-To rebuild it manually, run:
+Gear names, brands, canonical slugs, types, and thumbnails come from Sharply's
+`/api/v1/catalog` snapshot. The launcher stores that snapshot locally, so typing
+does not make network requests. Once per hour it sends the cached ETag in an
+`If-None-Match` request; unchanged catalogs return `304 Not Modified`. A valid
+cached snapshot remains usable if refresh fails. To force a conditional refresh
+and rebuild the colored index, run:
 
 ```bash
 sharply-search --rebuild-cache
@@ -163,14 +164,14 @@ sharply-search --rebuild-cache
 
 Generated index files live under `$XDG_CACHE_HOME/sharply-search/`, or
 `~/.cache/sharply-search/` when `XDG_CACHE_HOME` is unset, and can be safely deleted.
-The specification-label registry and gear thumbnails are cached there as well.
+The API catalog, its ETag, the specification-label registry, and gear thumbnails
+are cached there as well.
 Uncached thumbnails download alongside specification data without delaying the
 detail window. The completed download remains cached for the next view.
 
-Because the export does not contain canonical slugs, the launcher first probes a
-normalized best-guess slug such as `Nikon Z6III` → `nikon-z6iii`. A successful
-probe loads specifications directly; otherwise an exact-name search resolves the
-canonical slug. Search may also run in the background to populate a missing image.
+Because the catalog supplies canonical slugs and thumbnail URLs, selecting an item
+starts its thumbnail download and requests live specifications directly. No
+per-selection search request or guessed-slug probe is needed.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -233,7 +234,7 @@ bindsym $mod+g exec sharply-search
 | `wl-copy` missing | Install the `wl-clipboard` package. |
 | `Super+G` does nothing | Run `./install.sh`, then `hyprctl reload`. |
 | Styles are missing | Keep the CSS files beside the launcher or rerun the installer. |
-| Search index is stale | Run `sharply-search --rebuild-cache`. |
+| Search index is stale | Run `sharply-search --rebuild-cache` to conditionally refresh the API catalog. |
 
 API errors returned by Sharply are displayed directly in Wofi.
 

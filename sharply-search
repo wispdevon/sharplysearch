@@ -9,13 +9,16 @@ readonly detail_style="$root/wofi-details.css"
 readonly site='https://www.sharplyphoto.com'
 readonly api="$site/api/v1"
 readonly config_file="${XDG_CONFIG_HOME:-$HOME/.config}/sharply-search/.env"
-readonly gear_database="$root/export.json"
 readonly cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sharply-search"
+readonly catalog_cache="$cache_dir/catalog-v1.json"
+readonly catalog_etag="$cache_dir/catalog-v1.etag"
+readonly catalog_checked="$cache_dir/catalog-v1.checked"
 readonly catalog_rows="$cache_dir/catalog.rows"
 readonly catalog_lookup="$cache_dir/catalog.lookup.tsv"
 readonly catalog_manifest="$cache_dir/catalog.manifest"
 readonly spec_registry_cache="$cache_dir/spec-registry-v1.json"
-readonly cache_format_version=1
+readonly cache_format_version=2
+readonly catalog_refresh_seconds=3600
 readonly spec_fields='gear.basics,camera.sensor,camera.shutter,camera.fixed-lens,camera.build,camera.focus,camera.power,camera.video,camera.features,lens.optics,lens.aperture,lens.focus,lens.stabilization,lens.build,lens.filters,lens.accessories,lens.tiltShift,analog.camera'
 readonly timing_log="${SHARPLY_SEARCH_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/sharply-search/timing.log}"
 timing_started=${EPOCHREALTIME/./}
@@ -35,8 +38,12 @@ mkdir -p -- "${timing_log%/*}" 2>/dev/null || true
 log_timing 'launcher started'
 
 show_message() {
+  if ! command -v wofi >/dev/null; then
+    printf 'sharply-search: %s\n' "$1" >&2
+    return
+  fi
   printf '%s\n' "$1" | wofi --dmenu --prompt 'Sharply gear' --style "$style" \
-    --width "$(search_window_width)" --lines 1 --no-custom-entry >/dev/null || true
+    --location center --width "$(search_window_width)" --lines 1 --no-custom-entry >/dev/null || true
 }
 
 api_get() {
@@ -65,15 +72,6 @@ api_get() {
   fi
 }
 
-api_try_get() {
-  local output=$1 endpoint=$2 status
-  shift 2
-  status=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\n' \
-    "$SHARPLY_API_KEY" | curl --config - --silent --show-error --max-time 20 \
-    --output "$output" --write-out '%{http_code}' "$@" "$api/$endpoint") || return 1
-  [[ $status == 2* ]] && jq -e . "$output" >/dev/null 2>&1
-}
-
 cache_gear_image() {
   local source_url=$1 output=$2 url_file=$3 image_dir image_tmp
   local url_tmp content_type
@@ -94,13 +92,99 @@ cache_gear_image() {
   mv -f -- "$url_tmp" "$url_file"
 }
 
-cache_is_fresh() {
-  local version
-  [[ -r $gear_database ]] || return 1
+catalog_cache_valid() {
+  [[ -s $catalog_cache ]] || return 1
+  jq -e '
+    ((.version | type) == "string" and (.version | startswith("sha256-")))
+    and ((.generatedAt | type) == "string")
+    and ((.itemCount | type) == "number" and .itemCount > 0)
+    and ((.data | type) == "array")
+    and ((.data | length) == .itemCount)
+    and all(.data[];
+      (.name | type == "string" and length > 0)
+      and (.slug | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.brandName | type == "string" and length > 0)
+      and (.gearType | type == "string" and test("CAMERA|LENS")))
+  ' "$catalog_cache" >/dev/null 2>&1
+}
+
+catalog_needs_refresh() {
+  local checked_at=0
+  catalog_cache_valid || return 0
+  [[ -r $catalog_checked ]] && checked_at=$(stat -c '%Y' "$catalog_checked" 2>/dev/null || printf '0')
+  ((EPOCHSECONDS - checked_at >= catalog_refresh_seconds))
+}
+
+refresh_catalog() {
+  local body_tmp headers_tmp etag_tmp status message cached_etag=''
+  mkdir -p -- "$cache_dir"
+  body_tmp=$(mktemp "$cache_dir/.catalog-response.XXXXXX")
+  headers_tmp=$(mktemp "$cache_dir/.catalog-headers.XXXXXX")
+  etag_tmp=$(mktemp "$cache_dir/.catalog-etag.XXXXXX")
+  [[ -r $catalog_etag ]] && IFS= read -r cached_etag <"$catalog_etag"
+
+  if ! status=$(
+    {
+      printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\n' "$SHARPLY_API_KEY"
+      [[ -z $cached_etag ]] || printf 'header = "If-None-Match: %s"\n' "$cached_etag"
+    } | curl --config - --silent --show-error --max-time 20 --dump-header "$headers_tmp" \
+      --output "$body_tmp" --write-out '%{http_code}' "$api/catalog"
+  ); then
+    rm -f -- "$body_tmp" "$headers_tmp" "$etag_tmp"
+    return 1
+  fi
+
+  if [[ $status == 304 ]] && catalog_cache_valid; then
+    : >"$catalog_checked"
+    rm -f -- "$body_tmp" "$headers_tmp" "$etag_tmp"
+    log_timing 'catalog unchanged (HTTP 304)'
+    return 0
+  fi
+
+  if [[ $status != 2* ]]; then
+    message=$(jq -r '.error.message // empty' "$body_tmp" 2>/dev/null || true)
+    [[ -n $message ]] || message="Sharply catalog request failed (HTTP $status)."
+    rm -f -- "$body_tmp" "$headers_tmp" "$etag_tmp"
+    printf 'sharply-search: %s\n' "$message" >&2
+    return 1
+  fi
+
+  if ! jq -e '
+    ((.version | type) == "string" and (.version | startswith("sha256-")))
+    and ((.generatedAt | type) == "string")
+    and ((.itemCount | type) == "number" and .itemCount > 0)
+    and ((.data | type) == "array")
+    and ((.data | length) == .itemCount)
+    and all(.data[];
+      (.name | type == "string" and length > 0)
+      and (.slug | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.brandName | type == "string" and length > 0)
+      and (.gearType | type == "string" and test("CAMERA|LENS")))
+  ' "$body_tmp" >/dev/null 2>&1; then
+    rm -f -- "$body_tmp" "$headers_tmp" "$etag_tmp"
+    printf 'sharply-search: Sharply returned an invalid catalog response.\n' >&2
+    return 1
+  fi
+
+  awk 'BEGIN { IGNORECASE=1 } /^etag:/ {
+    sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit
+  }' "$headers_tmp" >"$etag_tmp"
+  if [[ ! -s $etag_tmp ]]; then
+    jq -r '.version | "\"" + . + "\""' "$body_tmp" >"$etag_tmp"
+  fi
+  mv -f -- "$body_tmp" "$catalog_cache"
+  mv -f -- "$etag_tmp" "$catalog_etag"
+  : >"$catalog_checked"
+  rm -f -- "$headers_tmp"
+  log_timing "catalog downloaded ($(jq -r '.itemCount' "$catalog_cache") items)"
+}
+
+catalog_index_is_current() {
+  local format_version catalog_version cached_catalog_version
   [[ -s $catalog_rows && -s $catalog_lookup && -r $catalog_manifest ]] || return 1
-  [[ $catalog_manifest -nt $gear_database ]] || return 1
-  IFS= read -r version <"$catalog_manifest" || return 1
-  [[ $version == "$cache_format_version" ]]
+  { IFS= read -r format_version; IFS= read -r cached_catalog_version; } <"$catalog_manifest" || return 1
+  catalog_version=$(jq -r '.version // empty' "$catalog_cache")
+  [[ $format_version == "$cache_format_version" && $cached_catalog_version == "$catalog_version" ]]
 }
 
 search_window_width() {
@@ -155,14 +239,15 @@ search_window_width() {
 }
 
 build_catalog_cache() {
-  local master_tmp rows_tmp lookup_tmp manifest_tmp choice_markup name brand count=0
+  local master_tmp rows_tmp lookup_tmp manifest_tmp
+  local choice_markup name brand slug thumbnail_url gear_type count=0 catalog_version
 
   command -v jq >/dev/null || {
     printf 'sharply-search: jq is required to build the catalog cache\n' >&2
     return 1
   }
-  [[ -r $gear_database ]] || {
-    printf 'sharply-search: %s is missing\n' "$gear_database" >&2
+  catalog_cache_valid || {
+    printf 'sharply-search: the API catalog cache is missing or invalid\n' >&2
     return 1
   }
 
@@ -173,7 +258,7 @@ build_catalog_cache() {
   manifest_tmp=$(mktemp "$cache_dir/.catalog-manifest.XXXXXX")
 
   if ! jq -er '
-    if (.items | type) != "array" then error("export.json must contain an items array") else . end
+    if (.data | type) != "array" then error("catalog data must be an array") else . end
     |
     def span($color; $weight; $text; $size):
       "<span foreground=\"" + $color + "\" weight=\"" + $weight
@@ -205,29 +290,28 @@ build_catalog_cache() {
       else $name
       end;
 
-    ([.items[].brand // "Unknown" | length] | max // 7) as $brand_width
-    | .items[]
+    ([.data[].brandName // "Unknown" | length] | max // 7) as $brand_width
+    | .data[]
     | .name as $name
-    | (.brand // "Unknown") as $brand
+    | (.brandName // "Unknown") as $brand
+    | .gearType as $gear_type
     | product_name($name; $brand) as $product
-    | (.mounts // [] | join(", ")) as $mounts
     | (brand_markup($brand; $brand_width)
        + "  " + span("#f2f0ea"; "650"; $product; "")
-       + (if $mounts == "" then ""
-          else "  " + span("#7e8995"; "500"; "· " + $mounts; "smaller")
-          end)) as $markup
-    | [$markup, $name, $brand]
+       + "  " + span("#7e8995"; "500"; "· " + ($gear_type | ascii_downcase); "smaller")) as $markup
+    | [$markup, $name, $brand, .slug, (.thumbnailUrl // "-"), .gearType]
     | join("\t")
-  ' "$gear_database" >"$master_tmp"; then
+  ' "$catalog_cache" >"$master_tmp"; then
     rm -f -- "$master_tmp" "$rows_tmp" "$lookup_tmp" "$manifest_tmp"
-    printf 'sharply-search: the bundled export.json is invalid\n' >&2
+    printf 'sharply-search: the cached API catalog is invalid\n' >&2
     return 1
   fi
 
-  while IFS=$'\t' read -r choice_markup name brand; do
-    [[ -n $choice_markup && -n $name ]] || continue
+  while IFS=$'\t' read -r choice_markup name brand slug thumbnail_url gear_type; do
+    [[ -n $choice_markup && -n $name && -n $slug ]] || continue
     printf '%s\n' "$choice_markup" >>"$rows_tmp"
-    printf '%s\t%s\t%s\n' "$choice_markup" "$name" "$brand" >>"$lookup_tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$choice_markup" "$name" "$brand" "$slug" "$thumbnail_url" "$gear_type" >>"$lookup_tmp"
     ((count += 1))
   done <"$master_tmp"
   rm -f -- "$master_tmp"
@@ -238,29 +322,23 @@ build_catalog_cache() {
     return 1
   fi
 
-  printf '%s\n' "$cache_format_version" >"$manifest_tmp"
+  catalog_version=$(jq -r '.version' "$catalog_cache")
+  printf '%s\n%s\n' "$cache_format_version" "$catalog_version" >"$manifest_tmp"
   mv -f -- "$rows_tmp" "$catalog_rows"
   mv -f -- "$lookup_tmp" "$catalog_lookup"
   mv -f -- "$manifest_tmp" "$catalog_manifest"
   log_timing "catalog cache rebuilt ($count items)"
 }
 
+rebuild_requested=false
 case ${1:-} in
-  '')
-    if ! command -v wofi >/dev/null; then
-      printf 'sharply-search: wofi is not installed\n' >&2
-      exit 1
-    fi
-    log_timing 'Wofi dependency checked'
-    ;;
+  '') ;;
   --rebuild-cache)
     (($# == 1)) || {
       printf 'Usage: sharply-search [--rebuild-cache]\n' >&2
       exit 2
     }
-    build_catalog_cache
-    printf 'Rebuilt Sharply catalog cache in %s\n' "$cache_dir"
-    exit 0
+    rebuild_requested=true
     ;;
   *)
     printf 'Usage: sharply-search [--rebuild-cache]\n' >&2
@@ -268,44 +346,18 @@ case ${1:-} in
     ;;
 esac
 
-if cache_is_fresh; then
-  log_timing 'catalog cache hit'
-else
-  log_timing 'catalog cache stale or missing'
-  if ! build_catalog_cache; then
-    show_message 'Could not build the local Sharply catalog cache.'
-    exit 1
-  fi
-fi
-
-search_width=$(search_window_width)
-log_timing "opening search window (${search_width}px wide)"
-choice=$(wofi --dmenu \
-  --prompt 'Search Sharply gear' --insensitive --matching fuzzy \
-  --style "$style" --width "$search_width" --height '65%' \
-  --define dynamic_lines=true --allow-markup --parse-search \
-  --no-custom-entry <"$catalog_rows") || exit 0
-
-selected_name=''
-selected_brand=''
-while IFS=$'\t' read -r choice_markup name brand; do
-  if [[ $choice_markup == "$choice" ]]; then
-    selected_name=$name
-    selected_brand=$brand
-    break
-  fi
-done <"$catalog_lookup"
-[[ -n $selected_name ]] || exit 0
-
-for dependency in curl jq xdg-open wl-copy; do
+for dependency in curl jq; do
   command -v "$dependency" >/dev/null || {
     show_message "$dependency is not installed."
     exit 1
   }
 done
-log_timing 'post-selection dependencies checked'
+if [[ $rebuild_requested == false ]] && ! command -v wofi >/dev/null; then
+  printf 'sharply-search: wofi is not installed\n' >&2
+  exit 1
+fi
 
-# Read one dotenv assignment without executing the file as shell code.
+# Read dotenv values without executing the file as shell code.
 if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
   SHARPLY_API_KEY=$(sed -n \
     's/^[[:space:]]*SHARPLY_API_KEY[[:space:]]*=[[:space:]]*//p' \
@@ -315,7 +367,6 @@ if [[ -z ${SHARPLY_API_KEY:-} && -r $config_file ]]; then
     SHARPLY_API_KEY=${SHARPLY_API_KEY:1:${#SHARPLY_API_KEY}-2}
   fi
 fi
-
 if [[ -z ${SHARPLY_WAIT_FOR_IMAGE:-} && -r $config_file ]]; then
   SHARPLY_WAIT_FOR_IMAGE=$(sed -n \
     's/^[[:space:]]*SHARPLY_WAIT_FOR_IMAGE[[:space:]]*=[[:space:]]*//p' \
@@ -339,30 +390,81 @@ if [[ $SHARPLY_API_KEY != sharply_live_* ]]; then
   show_message 'The configured Sharply API key has an invalid prefix.'
   exit 1
 fi
+log_timing 'API configuration initialized'
 
-search_response=$(mktemp)
+if [[ $rebuild_requested == true ]] || catalog_needs_refresh; then
+  log_timing 'catalog refresh started'
+  if ! refresh_catalog; then
+    if catalog_cache_valid; then
+      : >"$catalog_checked"
+      log_timing 'catalog refresh failed; using cached snapshot'
+    else
+      show_message 'Could not download the Sharply catalog.'
+      exit 1
+    fi
+  fi
+else
+  log_timing 'catalog snapshot cache hit'
+fi
+
+if [[ $rebuild_requested == true ]] || ! catalog_index_is_current; then
+  build_catalog_cache || {
+    show_message 'Could not build the local Sharply catalog index.'
+    exit 1
+  }
+else
+  log_timing 'catalog index cache hit'
+fi
+
+if [[ $rebuild_requested == true ]]; then
+  printf 'Refreshed Sharply catalog cache in %s\n' "$cache_dir"
+  exit 0
+fi
+
+search_width=$(search_window_width)
+log_timing "opening search window (${search_width}px wide)"
+choice=$(wofi --dmenu \
+  --prompt 'Search Sharply gear' --insensitive --matching fuzzy \
+  --style "$style" --location center --width "$search_width" --height '65%' \
+  --define dynamic_lines=true --allow-markup --parse-search \
+  --no-custom-entry <"$catalog_rows") || exit 0
+
+selected_name=''
+selected_brand=''
+slug=''
+thumbnail_url=''
+selected_gear_type=''
+while IFS=$'\t' read -r choice_markup name brand item_slug item_thumbnail item_gear_type; do
+  if [[ $choice_markup == "$choice" ]]; then
+    selected_name=$name
+    selected_brand=$brand
+    slug=$item_slug
+    thumbnail_url=$item_thumbnail
+    selected_gear_type=$item_gear_type
+    break
+  fi
+done <"$catalog_lookup"
+[[ -n $selected_name && -n $slug ]] || exit 0
+[[ $thumbnail_url != '-' ]] || thumbnail_url=''
+
+for dependency in xdg-open wl-copy; do
+  command -v "$dependency" >/dev/null || {
+    show_message "$dependency is not installed."
+    exit 1
+  }
+done
+log_timing 'post-selection dependencies checked'
 detail_response=$(mktemp)
 catalog_response=$(mktemp)
 runtime_detail_style=''
 image_pid=''
 registry_pid=''
-search_pid=''
-trap '[[ -z ${image_pid:-} ]] || kill "$image_pid" 2>/dev/null || true; [[ -z ${registry_pid:-} ]] || kill "$registry_pid" 2>/dev/null || true; [[ -z ${search_pid:-} ]] || kill "$search_pid" 2>/dev/null || true; rm -f "$search_response" "$detail_response" "$catalog_response" "${runtime_detail_style:-}"' EXIT
-log_timing 'API configuration initialized'
+trap '[[ -z ${image_pid:-} ]] || kill "$image_pid" 2>/dev/null || true; [[ -z ${registry_pid:-} ]] || kill "$registry_pid" 2>/dev/null || true; rm -f "$detail_response" "$catalog_response" "${runtime_detail_style:-}"' EXIT
 
-# Guess immediately so a cached hero can suppress image-related search entirely.
-guessed_slug=$(jq -nr --arg name "$selected_name" '
-  $name | ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-|-$"; "")
-')
 image_dir="$cache_dir/images"
-guessed_image_file="$image_dir/$guessed_slug"
-guessed_image_cached=false
-if [[ $guessed_slug =~ ^[a-z0-9][a-z0-9-]*$ && -s $guessed_image_file ]]; then
-  guessed_image_cached=true
-fi
 
 # The field-label registry changes far less often than individual gear data.
-# Fetch it once, in parallel with search, then reuse it from the local cache.
+# Fetch it once, in parallel with gear details, then reuse the local cache.
 registry_source=$spec_registry_cache
 if [[ ! -s $spec_registry_cache ]]; then
   api_get "$catalog_response" specs &
@@ -371,100 +473,6 @@ if [[ ! -s $spec_registry_cache ]]; then
   log_timing 'specification registry request started'
 else
   log_timing 'specification registry cache hit'
-fi
-
-# When the guessed image is absent, overlap the exact-name search with the
-# guessed specification probe. Its single response serves both image lookup
-# and canonical-slug fallback.
-if [[ $guessed_image_cached == false ]]; then
-  api_try_get "$search_response" search --get --data-urlencode "q=$selected_name" \
-    --data 'page=1' --data 'limit=25' &
-  search_pid=$!
-  log_timing 'background exact-name search started'
-fi
-
-slug=''
-thumbnail_url=''
-gear_specs_ready=false
-log_timing "guessed specification request started ($guessed_slug)"
-if [[ $guessed_slug =~ ^[a-z0-9][a-z0-9-]*$ ]] && \
-  api_try_get "$detail_response" "gear/$guessed_slug/specs" --get \
-    --data-urlencode "fields=$spec_fields"; then
-  slug=$guessed_slug
-  gear_specs_ready=true
-  log_timing "guessed slug succeeded ($slug)"
-else
-  log_timing "guessed slug missed ($guessed_slug)"
-  if [[ -z $search_pid ]]; then
-    api_try_get "$search_response" search --get --data-urlencode "q=$selected_name" \
-      --data 'page=1' --data 'limit=25' &
-    search_pid=$!
-    log_timing 'background exact-name search started for slug fallback'
-  fi
-fi
-
-if [[ -n $search_pid && $gear_specs_ready == true ]]; then
-  background_search_pid=$search_pid
-  {
-    while kill -0 "$background_search_pid" 2>/dev/null; do
-      sleep 0.001
-    done
-    log_timing 'background exact-name search completed'
-    IFS=$'\t' read -r resolved_slug resolved_thumbnail_url < <(jq -r \
-      --arg name "$selected_name" --arg brand "$selected_brand" '
-        ([.data[]
-          | select(.gearType | test("CAMERA|LENS"))
-          | select(.name == $name and ($brand == "" or .brandName == $brand))][0])
-        // ([.data[]
-          | select(.gearType | test("CAMERA|LENS"))
-          | select(.name == $name)][0])
-        // {}
-        | [(.slug // ""), (.thumbnailUrl // "")]
-        | @tsv
-      ' "$search_response" 2>/dev/null) || exit 1
-    [[ $resolved_slug == "$slug" && -n $resolved_thumbnail_url ]] || exit 1
-    mkdir -p -- "$image_dir"
-    if cache_gear_image "$resolved_thumbnail_url" \
-      "$image_dir/$slug" "$image_dir/$slug.url"; then
-      log_timing 'thumbnail download completed'
-    else
-      log_timing 'thumbnail download failed'
-      exit 1
-    fi
-  } &
-  image_pid=$!
-  log_timing 'background search assigned to thumbnail worker'
-fi
-
-if [[ -n $search_pid && $gear_specs_ready == false ]]; then
-  if ! wait "$search_pid"; then
-    search_pid=''
-    show_message 'Could not search the Sharply API.'
-    exit 1
-  fi
-  search_pid=''
-  log_timing 'background exact-name search completed'
-  IFS=$'\t' read -r resolved_slug thumbnail_url < <(jq -r --arg name "$selected_name" --arg brand "$selected_brand" '
-    ([.data[]
-      | select(.gearType | test("CAMERA|LENS"))
-      | select(.name == $name and ($brand == "" or .brandName == $brand))][0])
-    // ([.data[]
-      | select(.gearType | test("CAMERA|LENS"))
-      | select(.name == $name)][0])
-    // {}
-    | [(.slug // ""), (.thumbnailUrl // "")]
-    | @tsv
-  ' "$search_response")
-  if [[ $gear_specs_ready == false ]]; then
-    slug=$resolved_slug
-  elif [[ $resolved_slug != "$slug" ]]; then
-    thumbnail_url=''
-  fi
-fi
-
-if [[ -z $slug ]]; then
-  show_message 'Could not resolve this catalog item to a published gear page.'
-  exit 1
 fi
 
 gear_image=''
@@ -490,11 +498,9 @@ if [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   fi
 fi
 
-if [[ $gear_specs_ready == false ]]; then
-  api_get "$detail_response" "gear/$slug/specs" --get \
-    --data-urlencode "fields=$spec_fields" || exit 1
-  log_timing 'gear specification response received'
-fi
+api_get "$detail_response" "gear/$slug/specs" --get \
+  --data-urlencode "fields=$spec_fields" || exit 1
+log_timing "gear specification response received ($slug)"
 
 if [[ -n $registry_pid ]]; then
   if ! wait "$registry_pid"; then
@@ -565,7 +571,6 @@ if [[ $wait_for_image == true && -n $image_pid ]]; then
   log_timing 'waiting for thumbnail worker'
   wait "$image_pid" 2>/dev/null || true
   image_pid=''
-  search_pid=''
   log_timing 'thumbnail worker wait completed'
 fi
 
@@ -587,7 +592,7 @@ if [[ -n $gear_image ]]; then
   while IFS= read -r css_line || [[ -n $css_line ]]; do
     printf '%s\n' "$css_line"
   done <"$detail_style" >"$runtime_detail_style"
-  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: center 16px;\n  background-size: auto 210px;\n}\n\n#outer-box {\n  padding-top: 250px;\n}\n' \
+  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: center 20px;\n  background-size: auto 210px;\n}\n\n#outer-box {\n  padding-top: 250px;\n}\n' \
     "$css_image" >>"$runtime_detail_style"
   active_detail_style=$runtime_detail_style
 fi
@@ -595,7 +600,7 @@ detail_lines+=("↗  Open full Sharply page")
 log_timing 'detail Wofi launch'
 detail_choice=$(printf '%s\n' "${detail_lines[@]}" | wofi --dmenu \
   --prompt "Filter specs: $selected_name" --style "$active_detail_style" \
-  --width "$search_width" --height '65%' --insensitive --matching fuzzy \
+  --location center --width "$search_width" --height '65%' --insensitive --matching fuzzy \
   --allow-markup --parse-search --no-custom-entry) || exit 0
 
 if [[ $detail_choice == '↗  Open full Sharply page' ]]; then

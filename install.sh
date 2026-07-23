@@ -23,8 +23,6 @@ if [[ ! -f "$app_config_dir/.env" ]]; then
   printf 'Add your Sharply API key to %s before running the launcher.\n' "$app_config_dir/.env"
 fi
 
-"$root/sharply-search" --rebuild-cache
-
 if [[ -f $hypr_conf ]] && ! grep -Fqx "$include" "$hypr_conf"; then
   printf '\n# Sharply gear launcher\n%s\n' "$include" >> "$hypr_conf"
 fi
@@ -34,4 +32,5 @@ if command -v hyprctl >/dev/null && hyprctl monitors >/dev/null 2>&1; then
 fi
 
 printf 'Installed ~/.local/bin/sharply-search\n'
+printf 'The live Sharply catalog will be downloaded on first launch.\n'
 printf 'Linked Hyprland Super+G to sharply-search and reloaded the running session.\n'
