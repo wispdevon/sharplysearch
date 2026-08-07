@@ -17,7 +17,7 @@ readonly catalog_rows="$cache_dir/catalog.rows"
 readonly catalog_lookup="$cache_dir/catalog.lookup.tsv"
 readonly catalog_manifest="$cache_dir/catalog.manifest"
 readonly spec_registry_cache="$cache_dir/spec-registry-v1.json"
-readonly cache_format_version=2
+readonly cache_format_version=5
 readonly catalog_refresh_seconds=3600
 readonly spec_fields='gear.basics,camera.sensor,camera.shutter,camera.fixed-lens,camera.build,camera.focus,camera.power,camera.video,camera.features,lens.optics,lens.aperture,lens.focus,lens.stabilization,lens.build,lens.filters,lens.accessories,lens.tiltShift,analog.camera'
 readonly timing_log="${SHARPLY_SEARCH_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/sharply-search/timing.log}"
@@ -72,6 +72,16 @@ api_get() {
   fi
 }
 
+api_try_get() {
+  local output=$1 endpoint=$2 status
+  shift 2
+
+  status=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\n' \
+    "$SHARPLY_API_KEY" | curl --config - --silent --show-error --max-time 20 \
+    --output "$output" --write-out '%{http_code}' "$@" "$api/$endpoint") || return 1
+  [[ $status == 2* ]] && jq -e . "$output" >/dev/null 2>&1
+}
+
 cache_gear_image() {
   local source_url=$1 output=$2 url_file=$3 image_dir image_tmp
   local url_tmp content_type
@@ -90,6 +100,28 @@ cache_gear_image() {
   printf '%s\n' "$source_url" >"$url_tmp"
   mv -f -- "$image_tmp" "$output"
   mv -f -- "$url_tmp" "$url_file"
+}
+
+hero_image_size() {
+  local image=$1 layout=$2 width=0 height=0
+
+  if command -v identify >/dev/null; then
+    read -r width height _ < <(
+      identify -ping -format '%w %h\n' -- "$image" 2>/dev/null | head -n 1
+    ) || true
+  fi
+
+  if [[ $width =~ ^[0-9]+$ && $height =~ ^[0-9]+$ ]] && ((height > 0)); then
+    if [[ $layout == double ]] && ((width * 210 > height * 330)); then
+      printf '330px auto\n'
+    elif [[ $layout == single ]] && ((width * 210 > height * 680)); then
+      printf '680px auto\n'
+    else
+      printf 'auto 210px\n'
+    fi
+  else
+    printf 'auto 210px\n'
+  fi
 }
 
 catalog_cache_valid() {
@@ -289,6 +321,59 @@ build_catalog_cache() {
       then ($name[($brand | length):] | sub("^\\s+"; ""))
       else $name
       end;
+    def mount_aliases($name; $brand):
+      if $brand == "Canon" and ($name | test("\\bRF-S\\b"; "i")) then "canon rf-s mount"
+      elif $brand == "Canon" and ($name | test("\\bRF\\b"; "i")) then "canon rf mount"
+      elif $brand == "Canon" and ($name | test("\\bEF-S\\b"; "i")) then "canon ef-s mount"
+      elif $brand == "Canon" and ($name | test("\\bEF-M\\b"; "i")) then "canon ef-m mount"
+      elif $brand == "Canon" and ($name | test("\\bEF\\b"; "i")) then "canon ef mount"
+      elif $brand == "Nikon" and ($name | test("\\bNIKKOR Z\\b"; "i")) then "nikon z mount"
+      elif $brand == "Nikon" and ($name | test("\\b(AF-S|AF-P|AI-S|DX)\\b"; "i")) then "nikon f mount"
+      elif $brand == "Sony" and ($name | test("\\b(FE|E)\\b"; "i")) then "sony e mount"
+      elif $brand == "Fujifilm" and ($name | test("\\b(GF)\\b"; "i")) then "fujifilm g mount"
+      elif $brand == "Fujifilm" and ($name | test("\\b(XF|XC)\\b"; "i")) then "fujifilm x mount"
+      elif ($brand == "Olympus" or $brand == "OM System")
+        and ($name | test("\\bM[.]?ZUIKO\\b"; "i"))
+        then "micro four thirds mft m43 mount"
+      elif $brand == "Panasonic" and ($name | test("\\bLUMIX S\\b"; "i")) then "leica l mount"
+      elif $brand == "Panasonic" and ($name | test("\\bLUMIX G\\b"; "i"))
+        then "micro four thirds mft m43 mount"
+      else ""
+      end;
+    def search_aliases($item):
+      $item.name as $name
+      | $item.gearType as $gear_type
+      | ($item.brandName // "Unknown") as $brand
+      | [
+          ($item.releaseDate // "" | .[0:4]),
+          ($item.announcedDate // "" | .[0:4]),
+          mount_aliases($name; $brand)
+        ] as $metadata
+      | if $gear_type != "LENS" then ($metadata | map(select(length > 0)) | join(" "))
+      else
+        ([$name | scan("([0-9]+(?:\\.[0-9]+)?)\\s*mm"; "i") | .[0] | tonumber]
+          | max // 0) as $longest_focal_length
+        | ($name | test("[0-9]+(?:\\.[0-9]+)?\\s*[-–—]\\s*[0-9]+(?:\\.[0-9]+)?\\s*mm"; "i")) as $is_zoom
+        | ($metadata + [
+            (if $is_zoom then "zoom zoom lens" else
+              if $longest_focal_length > 0 then "prime prime lens fixed focal length" else empty end
+            end),
+            (if ($name | test("(^|[^0-9])50(?:\\.0)?\\s*mm"; "i"))
+                  and ($name | test("[-–—]\\s*50(?:\\.0)?\\s*mm"; "i") | not)
+              then "nifty fifty" else empty end),
+            (if $name | test("(^|[^0-9])(35|40|45|50|55|58|60)(?:\\.0)?\\s*mm"; "i")
+              then "human eye normal" else empty end),
+            (if $longest_focal_length >= 70 then "tight tele telephoto" else empty end),
+            (if $name | test("\\bpancake\\b"; "i")
+              then "pancake compact slim low profile short lens height" else empty end)
+          ])
+        | map(select(length > 0))
+        | join(" ")
+      end;
+    def hidden_search_text($text):
+      if $text == "" then ""
+      else "<span alpha=\"1\" size=\"1\"> " + ($text | @html) + "</span>"
+      end;
 
     ([.data[].brandName // "Unknown" | length] | max // 7) as $brand_width
     | .data[]
@@ -298,7 +383,8 @@ build_catalog_cache() {
     | product_name($name; $brand) as $product
     | (brand_markup($brand; $brand_width)
        + "  " + span("#f2f0ea"; "650"; $product; "")
-       + "  " + span("#7e8995"; "500"; "· " + ($gear_type | ascii_downcase); "smaller")) as $markup
+       + "  " + span("#7e8995"; "500"; "· " + ($gear_type | ascii_downcase); "smaller")
+       + hidden_search_text(search_aliases(.))) as $markup
     | [$markup, $name, $brand, .slug, (.thumbnailUrl // "-"), .gearType]
     | join("\t")
   ' "$catalog_cache" >"$master_tmp"; then
@@ -424,7 +510,7 @@ fi
 search_width=$(search_window_width)
 log_timing "opening search window (${search_width}px wide)"
 choice=$(wofi --dmenu \
-  --prompt 'Search Sharply gear' --insensitive --matching fuzzy \
+  --prompt 'Search Sharply gear' --insensitive --matching multi-contains \
   --style "$style" --location center --width "$search_width" --height '65%' \
   --define dynamic_lines=true --allow-markup --parse-search \
   --no-custom-entry <"$catalog_rows") || exit 0
@@ -455,11 +541,16 @@ for dependency in xdg-open wl-copy; do
 done
 log_timing 'post-selection dependencies checked'
 detail_response=$(mktemp)
+gear_response=$(mktemp)
 catalog_response=$(mktemp)
 runtime_detail_style=''
+runtime_title_svg=''
 image_pid=''
+secondary_image_pid=''
+detail_pid=''
+gear_pid=''
 registry_pid=''
-trap '[[ -z ${image_pid:-} ]] || kill "$image_pid" 2>/dev/null || true; [[ -z ${registry_pid:-} ]] || kill "$registry_pid" 2>/dev/null || true; rm -f "$detail_response" "$catalog_response" "${runtime_detail_style:-}"' EXIT
+trap 'for pid in "${image_pid:-}" "${secondary_image_pid:-}" "${detail_pid:-}" "${gear_pid:-}" "${registry_pid:-}"; do [[ -z $pid ]] || kill "$pid" 2>/dev/null || true; done; rm -f "$detail_response" "$gear_response" "$catalog_response" "${runtime_detail_style:-}" "${runtime_title_svg:-}"' EXIT
 
 image_dir="$cache_dir/images"
 
@@ -476,9 +567,12 @@ else
 fi
 
 gear_image=''
+secondary_gear_image=''
 if [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   image_file="$image_dir/$slug"
   image_url_file="$image_file.url"
+  secondary_image_file="$image_dir/$slug-secondary"
+  secondary_image_url_file="$secondary_image_file.url"
   cached_image_url=''
   [[ -r $image_url_file ]] && IFS= read -r cached_image_url <"$image_url_file"
 
@@ -499,7 +593,57 @@ if [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
 fi
 
 api_get "$detail_response" "gear/$slug/specs" --get \
-  --data-urlencode "fields=$spec_fields" || exit 1
+  --data-urlencode "fields=$spec_fields" &
+detail_pid=$!
+api_try_get "$gear_response" "gear/$slug" &
+gear_pid=$!
+log_timing 'gear specification and media requests started'
+
+secondary_thumbnail_url=''
+if wait "$gear_pid"; then
+  gear_pid=''
+  secondary_thumbnail_url=$(jq -r --arg primary "$thumbnail_url" '
+    [
+      .data.thumbnailUrl?,
+      .data.topViewUrl?,
+      .data.rearViewUrl?,
+      .data.ogImageUrl?
+    ]
+    | map(select(type == "string" and length > 0 and . != $primary))
+    | first // empty
+  ' "$gear_response")
+  log_timing 'gear media response received'
+
+  if [[ -n $secondary_thumbnail_url ]]; then
+    cached_secondary_url=''
+    [[ -r $secondary_image_url_file ]] &&
+      IFS= read -r cached_secondary_url <"$secondary_image_url_file"
+    if [[ ! -s $secondary_image_file ||
+      $cached_secondary_url != "$secondary_thumbnail_url" ]]; then
+      mkdir -p -- "$image_dir"
+      {
+        if cache_gear_image "$secondary_thumbnail_url" \
+          "$secondary_image_file" "$secondary_image_url_file"; then
+          log_timing 'secondary image download completed'
+        else
+          log_timing 'secondary image download failed'
+          exit 1
+        fi
+      } &
+      secondary_image_pid=$!
+      log_timing 'secondary image download started'
+    fi
+  fi
+else
+  gear_pid=''
+  log_timing 'gear media request unavailable'
+fi
+
+if ! wait "$detail_pid"; then
+  detail_pid=''
+  exit 1
+fi
+detail_pid=''
 log_timing "gear specification response received ($slug)"
 
 if [[ -n $registry_pid ]]; then
@@ -573,6 +717,12 @@ if [[ $wait_for_image == true && -n $image_pid ]]; then
   image_pid=''
   log_timing 'thumbnail worker wait completed'
 fi
+if [[ $wait_for_image == true && -n $secondary_image_pid ]]; then
+  log_timing 'waiting for secondary image worker'
+  wait "$secondary_image_pid" 2>/dev/null || true
+  secondary_image_pid=''
+  log_timing 'secondary image worker wait completed'
+fi
 
 if [[ -n ${image_file:-} && -s ${image_file:-} && -r ${image_url_file:-} ]]; then
   cached_image_url=''
@@ -583,23 +733,59 @@ if [[ -n ${image_file:-} && -s ${image_file:-} && \
   gear_image=$image_file
   rm -f -- "$image_dir/$slug-480x240.webp" "$image_dir/$slug-480x240.webp.url"
 fi
+if [[ -n ${secondary_image_file:-} && -s ${secondary_image_file:-} &&
+  -r ${secondary_image_url_file:-} ]]; then
+  cached_secondary_url=''
+  IFS= read -r cached_secondary_url <"$secondary_image_url_file" || true
+  if [[ -n $secondary_thumbnail_url &&
+    $cached_secondary_url == "$secondary_thumbnail_url" ]]; then
+    secondary_gear_image=$secondary_image_file
+  fi
+fi
 
-active_detail_style=$detail_style
-if [[ -n $gear_image ]]; then
-  runtime_detail_style=$(mktemp "$cache_dir/.detail-style.XXXXXX.css")
+runtime_title_svg=$(mktemp "$cache_dir/.detail-title.XXXXXX.svg")
+title_xml=$(jq -Rnr --arg value "$selected_name" '$value | @html')
+printf '<svg xmlns="http://www.w3.org/2000/svg" width="748" height="58" viewBox="0 0 748 58"><text x="0" y="44" fill="#f2f0ea" style="font-family:&quot;Space Grotesk&quot;,&quot;Noto Sans&quot;,sans-serif;font-size:40px;font-weight:700;line-height:0.98;letter-spacing:-0.35px">%s</text></svg>\n' \
+  "$title_xml" >"$runtime_title_svg"
+
+runtime_detail_style=$(mktemp "$cache_dir/.detail-style.XXXXXX.css")
+while IFS= read -r css_line || [[ -n $css_line ]]; do
+  printf '%s\n' "$css_line"
+done <"$detail_style" >"$runtime_detail_style"
+css_title=${runtime_title_svg//\\/\\\\}
+css_title=${css_title//\"/\\\"}
+
+if [[ -n $gear_image && -n $secondary_gear_image ]]; then
   css_image=${gear_image//\\/\\\\}
   css_image=${css_image//\"/\\\"}
-  while IFS= read -r css_line || [[ -n $css_line ]]; do
-    printf '%s\n' "$css_line"
-  done <"$detail_style" >"$runtime_detail_style"
-  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: center 20px;\n  background-size: auto 210px;\n}\n\n#outer-box {\n  padding-top: 250px;\n}\n' \
-    "$css_image" >>"$runtime_detail_style"
-  active_detail_style=$runtime_detail_style
+  css_secondary_image=${secondary_gear_image//\\/\\\\}
+  css_secondary_image=${css_secondary_image//\"/\\\"}
+  primary_image_size=$(hero_image_size "$gear_image" double)
+  secondary_image_size=$(hero_image_size "$secondary_gear_image" double)
+  printf '\nwindow {\n  background-image: url("%s"), url("%s"), url("%s");\n  background-repeat: no-repeat, no-repeat, no-repeat;\n  background-position: 26px 20px, 28%% 88px, 72%% 88px;\n  background-size: 748px 58px, %s, %s;\n}\n\n#outer-box {\n  padding-top: 316px;\n}\n' \
+    "$css_title" "$css_image" "$css_secondary_image" \
+    "$primary_image_size" "$secondary_image_size" >>"$runtime_detail_style"
+elif [[ -n $gear_image ]]; then
+  css_image=${gear_image//\\/\\\\}
+  css_image=${css_image//\"/\\\"}
+  primary_image_size=$(hero_image_size "$gear_image" single)
+  printf '\nwindow {\n  background-image: url("%s"), url("%s");\n  background-repeat: no-repeat, no-repeat;\n  background-position: 26px 20px, center 88px;\n  background-size: 748px 58px, %s;\n}\n\n#outer-box {\n  padding-top: 316px;\n}\n' \
+    "$css_title" "$css_image" "$primary_image_size" >>"$runtime_detail_style"
+elif [[ -n $secondary_gear_image ]]; then
+  css_secondary_image=${secondary_gear_image//\\/\\\\}
+  css_secondary_image=${css_secondary_image//\"/\\\"}
+  secondary_image_size=$(hero_image_size "$secondary_gear_image" single)
+  printf '\nwindow {\n  background-image: url("%s"), url("%s");\n  background-repeat: no-repeat, no-repeat;\n  background-position: 26px 20px, center 88px;\n  background-size: 748px 58px, %s;\n}\n\n#outer-box {\n  padding-top: 316px;\n}\n' \
+    "$css_title" "$css_secondary_image" "$secondary_image_size" >>"$runtime_detail_style"
+else
+  printf '\nwindow {\n  background-image: url("%s");\n  background-repeat: no-repeat;\n  background-position: 26px 20px;\n  background-size: 748px 58px;\n}\n\n#outer-box {\n  padding-top: 92px;\n}\n' \
+    "$css_title" >>"$runtime_detail_style"
 fi
+active_detail_style=$runtime_detail_style
 detail_lines+=("↗  Open full Sharply page")
 log_timing 'detail Wofi launch'
 detail_choice=$(printf '%s\n' "${detail_lines[@]}" | wofi --dmenu \
-  --prompt "Filter specs: $selected_name" --style "$active_detail_style" \
+  --prompt "Filter specifications" --style "$active_detail_style" \
   --location center --width "$search_width" --height '65%' --insensitive --matching fuzzy \
   --allow-markup --parse-search --no-custom-entry) || exit 0
 

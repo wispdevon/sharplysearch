@@ -57,7 +57,14 @@ application and is not affiliated with Sharply Photo.
 - Cached Sharply thumbnails in the gear-detail view when available.
 - Authoritative labels from Sharply's live `/api/v1/specs` registry.
 - Aligned `Label │ Value` columns in a dedicated monospace detail view.
-- Case-insensitive fuzzy matching for gear and individual specifications.
+- Case-insensitive, order-independent partial matching for gear names and brands,
+  plus fuzzy matching for individual specifications.
+- Semantic lens aliases including `nifty fifty`, `human eye`, `tight`, `tele`,
+  and `telephoto`.
+- Searchable lens type, common mount aliases, and catalog years, including
+  `prime`, `zoom`, `RF mount`, `Z mount`, `E mount`, and `MFT`.
+- Compact lens aliases such as `pancake`, `slim`, and `low profile` when the
+  catalog name identifies a pancake design.
 - One-key copying of `Label: Value` to the Wayland clipboard.
 - Optional desktop notification after copying.
 - Direct link to the complete Sharply gear page.
@@ -190,14 +197,18 @@ credential to `https://www.sharplyphoto.com/api/v1/*`; it is not embedded in the
 launcher, browser UI, or command-line arguments. Sharply currently limits each key
 to 60 requests per fixed UTC minute.
 
-To always wait for an uncached thumbnail before opening the detail window, add:
+Sharply Search displays up to two distinct images supplied by Sharply for each
+gear item and caches them locally. Images are fitted within the available hero
+box by width or height as appropriate, so wide telephotos remain centered and
+two-image views do not overlap. To always wait for all available uncached images
+before opening the detail window, add:
 
 ```dotenv
 SHARPLY_WAIT_FOR_IMAGE=true
 ```
 
-Leave it unset or set it to `false` to open immediately and use the cached image
-on the next view.
+Leave it unset or set it to `false` to open immediately and use images that
+finish downloading on the next view.
 
 ### Hyprland
 

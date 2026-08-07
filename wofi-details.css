@@ -18,8 +18,11 @@ window {
 }
 
 #input {
+  font-family: "Space Grotesk", "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: normal;
   min-height: 52px;
   margin: 0 0 18px;
   padding: 0 18px;
